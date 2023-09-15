@@ -1,0 +1,9 @@
+{
+    "db": {
+        "url": "postgresql+psycopg2",
+        "username": "postgres",
+        "password": "postgres",
+        "host": "localhost",
+        "database": "python_proxy"
+    }
+}
