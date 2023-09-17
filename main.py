@@ -71,6 +71,8 @@ class HttpGetHandler(BaseHTTPRequestHandler):
                                       timeout=5,
                                       json=json_param,
                                       data=data_param)
+        
+        db_queries.save_response(**parsers.parse_response(proxy_resp, db_request.id))
 
         self.send_response(proxy_resp.status_code)
 
@@ -78,9 +80,11 @@ class HttpGetHandler(BaseHTTPRequestHandler):
         for key, value in proxy_resp.headers.items():
             self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(proxy_resp.text.encode())
+        self.wfile.write('<html><head><meta charset="utf-8">'.encode())
+        self.wfile.write('<title>Простой HTTP-сервер.</title></head>'.encode())
+        self.wfile.write('<body>Был получен GET-запрос.</body></html>'.encode())
+        # self.wfile.write(proxy_resp.text.encode())
 
-        db_queries.save_response(**parsers.parse_response(proxy_resp, db_request.id))
 
     def do_CONNECT(self):
         # parsers.parse_request(f"https://{self.path}")
