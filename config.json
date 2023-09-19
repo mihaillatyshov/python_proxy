@@ -1,8 +1,8 @@
 {
     "db": {
         "url": "postgresql+psycopg2",
-        "username": "postgres",
-        "password": "postgres",
+        "username": "docker",
+        "password": "docker",
         "host": "localhost",
         "database": "python_proxy"
     }
