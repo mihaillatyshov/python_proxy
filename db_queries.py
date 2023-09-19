@@ -15,13 +15,15 @@ def save_request(
     cookies: CookiesJson,
     search_params: SearchParamsJson,
     body_params: BodyParamsJson,
+    is_tls: bool
 ) -> Request:
     request = Request(method=method,
                       path=path,
                       headers=headers,
                       cookies=cookies,
                       search_params=search_params,
-                      body_params=body_params)
+                      body_params=body_params,
+                      is_tls=is_tls)
 
     DBsession.add(request)
     DBsession.commit()

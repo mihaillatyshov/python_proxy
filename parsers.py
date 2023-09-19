@@ -1,51 +1,57 @@
-from urllib.parse import parse_qs, urlparse
-from http.client import responses
+import json
 
-from requests import Response
-
-from base import BodyParamsJson, HeadersJson, MethodLiteral
+from urllib.parse import parse_qs, urlparse, urlencode
+from db_models import Request
+from tcp_proxy import HttpRequest, HttpResponse
 
 
 #########################################################################################################################
 ################ Request ################################################################################################
 #########################################################################################################################
-def parse_request(
-    method: MethodLiteral,
-    url: str,
-    headers: HeadersJson,
-    body_params: BodyParamsJson,
-):
-    parsed_url = urlparse(url)
+def parse_http_request(request: HttpRequest):
+    parsed_url = urlparse(request.path)
 
     cookies = {}
-    if cookies_str := headers.get("Cookie"):
-        del headers["Cookie"]
+    if cookies_str := request.get_header("Cookie"):
+        del request.headers["Cookie"]
         for item in cookies_str.split(";"):
             splited_item = item.split("=")
             if len(splited_item) == 2:
                 cookies[splited_item[0]] = splited_item[1]
 
     return {
-        "method": method,
+        "method": request.method,
         "path": parsed_url.path,
-        "headers": dict(headers),
+        "headers": request.headers,
         "cookies": cookies,
         "search_params": parse_qs(parsed_url.query),
-        "body_params": body_params
+        "body_params": request.data.decode() if request.data is not None else None,
+        "is_tls": request.is_tls
     }
+
+
+def db_to_http_request(request: Request) -> HttpRequest:
+    result = HttpRequest()
+    result.method = request.method
+    result.path = request.path + urlencode(request.search_params)
+    result.http_version = "HTTP/1.1"
+    result.headers = request.headers
+    result.headers["Cookie"] = "; ".join([f"{key}={value}" for key, value in request.cookies.items()]) + ";"
+    result.data = json.dumps(request.body_params).encode()
+    result.is_tls = request.is_tls
+
+    return result
 
 
 #########################################################################################################################
 ################ Response ###############################################################################################
 #########################################################################################################################
-def parse_response(response: Response, request_id: int):
-    fixed_headers = {key: value for key, value in response.headers.items()}
-
+def parse_http_response(response: HttpResponse, request_id: int):
     return {
         "code": response.status_code,
-        "message": responses[response.status_code],
-        "headers": fixed_headers,
-        "body": response.text,
+        "message": response.message,
+        "headers": response.headers,
+        "body": response.data.decode() if response.data is not None else None,
         "request_id": request_id,
     }
 

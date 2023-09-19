@@ -1,7 +1,7 @@
 import json
 from typing import Type
 
-from sqlalchemy import (Column, ForeignKey, Integer, String, Text, create_engine)
+from sqlalchemy import (Boolean,Column, ForeignKey, Integer, String, Text, create_engine)
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, scoped_session, sessionmaker
@@ -25,6 +25,7 @@ class Request(Base):
     cookies = Column(JSON, nullable=False)
     search_params = Column(JSON, nullable=False)
     body_params = Column(JSON, nullable=False)
+    is_tls = Column(Boolean, nullable=False, default=False)
 
 
 #########################################################################################################################

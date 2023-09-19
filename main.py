@@ -1,110 +1,102 @@
-import cgi
-import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import socket
+import ssl
+import subprocess
 from threading import Thread
-from urllib.parse import parse_qs
-
-import requests
 
 import db_queries
 import parsers
-from base import MethodLiteral, http_method_funcs_aliases
 from flask_app import create_app
+from tcp_proxy import (HttpRequest, HttpResponse, intercept_request,
+                       proxy_client)
 
 
-def run(server_class=HTTPServer, handler_class=BaseHTTPRequestHandler):
-    server_address = ('', 8080)
-    httpd = server_class(server_address, handler_class)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        httpd.server_close()
-
-
-class HttpGetHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.process_request("GET")
-
-    def do_POST(self):
-        self.process_request("POST")
-
-    def do_PUT(self):
-        self.process_request("PUT")
-
-    def do_HEAD(self):
-        self.process_request("HEAD")
-
-    def do_OPTIONS(self):
-        self.process_request("OPTIONS")
-
-    def do_PATCH(self):
-        self.process_request("PATCH")
-
-    def do_DELETE(self):
-        self.process_request("DELETE")
-
-    def process_request(self, method: MethodLiteral):
-        requests_command = http_method_funcs_aliases[method]
-        del self.headers["Proxy-Connection"]
-
-        body_params = {}
-        data_param = None
-        json_param = None
-        if content_type := self.headers.get('content-type'):
-            ctype, pdict = cgi.parse_header(content_type)
-            if ctype == 'multipart/form-data':
-                body_params = cgi.parse_multipart(self.rfile, pdict)
-            elif ctype == 'application/x-www-form-urlencoded':
-                length = int(self.headers['content-length'])
-                body_params = parse_qs(self.rfile.read(length), keep_blank_values=True)
-                body_params = {key.decode(): [v.decode() for v in vals] for key, vals in body_params.items()}
-                data_param = body_params
-            elif length := int(self.headers['content-length']):
-                body_params = json.loads(self.rfile.read(length).decode())
-                json_param = body_params
-
-        db_request = db_queries.save_request(**parsers.parse_request(method, self.path, self.headers, body_params))
-
-        proxy_resp = requests_command(url=self.path,
-                                      headers=self.headers,
-                                      allow_redirects=False,
-                                      timeout=5,
-                                      json=json_param,
-                                      data=data_param)
+def load_file_data(filepath: str) -> bytes:
+    with open(filepath, "rb") as f:
+        return f.read()
         
-        db_queries.save_response(**parsers.parse_response(proxy_resp, db_request.id))
 
-        self.send_response(proxy_resp.status_code)
+def create_tls_context(host: str):
+    fixed_host = host.removesuffix(":443")
+    result = subprocess.run(["./certs/gen.sh", fixed_host], capture_output=True)
+    print(f"Create cert for {fixed_host}")
+    
+    cert_filepath = f"./certs/{fixed_host}"
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    with open(cert_filepath, "wb") as cert_file:
+        cert_file.write(result.stdout)
+        
+    key_filepath = "./certs/cert.key"
+    context.load_cert_chain(cert_filepath, key_filepath)
+    return context
 
-        self._headers_buffer = [self._headers_buffer[0]]
-        for key, value in proxy_resp.headers.items():
-            self.send_header(key, value)
-        self.end_headers()
-        self.wfile.write('<html><head><meta charset="utf-8">'.encode())
-        self.wfile.write('<title>Простой HTTP-сервер.</title></head>'.encode())
-        self.wfile.write('<body>Был получен GET-запрос.</body></html>'.encode())
-        # self.wfile.write(proxy_resp.text.encode())
+
+def server_loop(server_sock: socket.socket):
+    while True:
+        try:
+            connection, client_address = server_sock.accept()
+            print("\n===========================================================================")
+            print(f"New client accepted {client_address}")
+
+            request = intercept_request(connection)
+
+            request.del_header("Proxy-Connection")
+            request.del_header("Accept-Encoding")
+
+            if request.method == "CONNECT":
+                tls_context = create_tls_context(request.get_header("Host"))
+                connection.sendall("HTTP/1.0 200 Connection established\n\n".encode())
+                with tls_context.wrap_socket(connection, server_side=True) as tls_connection:
+                    request = intercept_request(tls_connection)
+                    request.is_tls = True
+                    response = proxy_client(request)
+                    
+                    
+                    tls_connection.sendall(f"{response.http_version} {response.status_code} {response.message}\n".encode())
+                    tls_connection.sendall(response.headers_to_str().encode())
+                    if response.data:
+                        tls_connection.sendall(response.data)
+                    
+                    db_request = db_queries.save_request(**parsers.parse_http_request(request))
+                    db_queries.save_response(**parsers.parse_http_response(response, db_request.id))
+                
+            else:
+                response = proxy_client(request)
+
+                connection.sendall(f"{response.http_version} {response.status_code} {response.message}\n".encode())
+                connection.sendall(response.headers_to_str().encode())
+                if response.data:
+                    connection.sendall(response.data)
+                connection.close()
+                
+                db_request = db_queries.save_request(**parsers.parse_http_request(request))
+                db_queries.save_response(**parsers.parse_http_response(response, db_request.id))
+
+        except KeyboardInterrupt as e:
+            raise e
+        except Exception as e:
+            print("[ Error ]: ", e)
 
 
-    def do_CONNECT(self):
-        # parsers.parse_request(f"https://{self.path}")
+def run():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
+        try:
+            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_sock.bind(("0.0.0.0", 8080))
+            server_sock.listen()
+            print("Server started")
 
-        with requests.get(url=f"https://{self.path}", headers=self.headers, allow_redirects=False,
-                          stream=True) as proxy_resp:
-            for line in proxy_resp.iter_lines():
-                print(line.decode())
+            server_loop(server_sock)
 
-        self.send_response(proxy_resp.status_code)
-
-        self._headers_buffer = [self._headers_buffer[0]]
-        for key, value in proxy_resp.headers.items():
-            self.send_header(key, value)
-        self.end_headers()
+        except KeyboardInterrupt:
+            print("Server closed")
+            exit()
 
 
 if __name__ == '__main__':
-    thread = Thread(target=run, args=(HTTPServer, HttpGetHandler))
+    thread = Thread(target=run)
     thread.start()
-
+    
     app = create_app()
     app.run(host="0.0.0.0", port=8000)
+    
+    

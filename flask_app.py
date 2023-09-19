@@ -10,6 +10,7 @@ from api_exceptions import InvalidAPIUsage, ResponseInjectionFound
 from base import http_method_funcs_aliases, MethodLiteral
 import db_queries
 import parsers
+from tcp_proxy import HttpResponse, proxy_client
 
 base_blueprint = Blueprint("base", __name__)
 routes_bp = Blueprint("routes", __name__)
@@ -102,86 +103,82 @@ def get_data_and_json(db_body_params: dict, headers: dict[str, str]) -> tuple[di
 @routes_bp.route("/repeat/<int:id>", methods=["GET"])
 def repeat_request_by_id(id: int):
     db_request = db_queries.get_request_by_id(id)
-    requests_command = http_method_funcs_aliases[cast(MethodLiteral, db_request.method)]
-
-    path = get_path(db_request.headers, db_request.path)
-    headers = get_headers(db_request.headers, db_request.cookies)
-    data, json = get_data_and_json(db_request.body_params, headers)
-
-    proxy_resp = requests_command(url=path,
-                                  params=db_request.search_params,
-                                  headers=headers,
-                                  allow_redirects=False,
-                                  data=data,
-                                  json=json,
-                                  timeout=5)
-
-    response = db_queries.save_response(**parsers.parse_response(proxy_resp, db_request.id))
-
+    http_response = proxy_client(parsers.db_to_http_request(db_request))
+    response = db_queries.save_response(**parsers.parse_http_response(http_response, db_request.id))
     return {"response": response}
 
 
-def check_for_command_injection(response: Response):
-    if "root:" in response.text:
+def check_for_command_injection(response: HttpResponse):
+    if "root:" in response.data.decode():
         raise ResponseInjectionFound()
 
 
 # ! variant 1
 @routes_bp.route("/scan/<int:id>", methods=["GET"])
 def scan_request_by_id(id: int):
-    db_request = db_queries.get_request_by_id(id)
-    requests_command = http_method_funcs_aliases[cast(MethodLiteral, db_request.method)]
+    # db_request = db_queries.get_request_by_id(id)
+    # requests_command = http_method_funcs_aliases[cast(MethodLiteral, db_request.method)]
 
-    path = get_path(db_request.headers, db_request.path)
-    headers = get_headers(db_request.headers, db_request.cookies)
-    data, json = get_data_and_json(db_request.body_params, headers)
+    # path = get_path(db_request.headers, db_request.path)
+    # headers = get_headers(db_request.headers, db_request.cookies)
+    # data, json = get_data_and_json(db_request.body_params, headers)
 
     checks = [";cat /etc/passwd;", "|cat /etc/passwd|", "`cat /etc/passwd`"]
 
     for check_str in checks:
         try:
-            proxy_resp = requests_command(url=path + check_str,
-                                          params=db_request.search_params,
-                                          headers=headers,
-                                          allow_redirects=False,
-                                          data=data,
-                                          json=json,
-                                          timeout=5)
-            db_queries.save_response(**parsers.parse_response(proxy_resp, db_request.id))
-            check_for_command_injection(proxy_resp)
+            db_request = db_queries.get_request_by_id(id)
+            http_request = parsers.db_to_http_request(db_request)
+            http_request.method += check_str
+            http_response = proxy_client(http_request)
+            db_queries.save_response(**parsers.parse_http_response(http_response, db_request.id))
+            check_for_command_injection(http_response)
 
+        except ResponseInjectionFound as e:
+            raise
         except Exception as e:
-            print(f"skipped: {e}")
+            print(f"----------------------------------------------\nskipped: {e}")
+        
+        try:
+            db_request = db_queries.get_request_by_id(id)
+            http_request = parsers.db_to_http_request(db_request)
+            http_request.http_version += check_str
+            http_response = proxy_client(http_request)
+            db_queries.save_response(**parsers.parse_http_response(http_response, db_request.id))
+            check_for_command_injection(http_response)
+
+        except ResponseInjectionFound as e:
+            raise
+        except Exception as e:
+            print(f"----------------------------------------------\nskipped: {e}")
 
         try:
-            if data is not None:
-                proxy_resp = requests_command(url=path,
-                                              params=db_request.search_params,
-                                              headers=headers,
-                                              allow_redirects=False,
-                                              data={
-                                                  **data, "super_check_param": check_str
-                                              },
-                                              json=json,
-                                              timeout=5)
-                db_queries.save_response(**parsers.parse_response(proxy_resp, db_request.id))
-                check_for_command_injection(proxy_resp)
+            db_request = db_queries.get_request_by_id(id)
+            
+            if db_request.body_params is not None:
+                http_request = parsers.db_to_http_request(db_request)
+                http_request.data += check_str.encode()
+                http_response = proxy_client(http_request)
+                db_queries.save_response(**parsers.parse_http_response(http_response, db_request.id))
+                check_for_command_injection(http_response)
+                
+        except ResponseInjectionFound as e:
+            raise
         except Exception as e:
-            print(f"skipped: {e}")
+            print(f"----------------------------------------------\nskipped: {e}")
 
         try:
-            if headers.get("Cookie") is not None:
-                headers["Cookie"] += check_str
-                proxy_resp = requests_command(url=path + check_str,
-                                              params=db_request.search_params,
-                                              headers=headers,
-                                              allow_redirects=False,
-                                              data=data,
-                                              json=json,
-                                              timeout=5)
-                db_queries.save_response(**parsers.parse_response(proxy_resp, db_request.id))
-                check_for_command_injection(proxy_resp)
+            db_request = db_queries.get_request_by_id(id)
+            http_request = parsers.db_to_http_request(db_request)
+            if http_request.get_header("Cookie") is not None:
+                http_request.headers["Cookie"] += check_str
+                http_response = proxy_client(http_request)
+                db_queries.save_response(**parsers.parse_http_response(http_response, db_request.id))
+                check_for_command_injection(http_response)
+                
+        except ResponseInjectionFound as e:
+            raise
         except Exception as e:
-            print(f"skipped: {e}")
+            print(f"----------------------------------------------\nskipped: {e}")
 
     return {"message": "No Injection"}
